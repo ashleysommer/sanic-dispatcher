@@ -70,7 +70,7 @@ otherapp = Sanic("MyChildApp")
 dispatcher.register_sanic_application(otherapp, "/childprefix")
 
 @otherapp.route('/')
-def index(request):
+async def index(request):
     return response.text("Hello World from Child App")
 ```
 Browsing to url `/childprefix/` will invoke the `otherapp` App, and call the `/` route which displays "Hello World from Child App"
@@ -121,11 +121,11 @@ otherapp = Sanic("MyChildApp")
 dispatcher.register_sanic_application(otherapp, "/childprefix")
 
 @app.route('/')
-def index(request):
+async def index(request):
     return response.text("Hello World from Default App")
 
 @otherapp.route('/')
-def index(request):
+async def index(request):
     return response.text("Hello World from Child App")
 ```
 Browsing to url `/` will *not* invoke any Dispatcher applications, so `app` will handle the request itself, resolving the `/` route which displays "Hello World from Default App"
