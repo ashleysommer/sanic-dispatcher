@@ -28,6 +28,19 @@ class SanicApplication(object):
         self.app = app
         self.apply_middleware = apply_middleware
 
+class SanicCompatURL(object):
+    __slots__ = ('schema', 'host', 'port', 'path', 'query', 'fragment', 'userinfo')
+
+    def __init__(self, schema, host, port, path, query, fragment, userinfo):
+        self.schema = schema
+        self.host = host
+        self.port = port
+        self.path = path
+        self.query = query
+        self.fragment = fragment
+        self.userinfo = userinfo
+
+
 
 class SanicDispatcherMiddleware(object):
     """Is a multi-application dispatcher, and also acts as a sanic-to-wsgiApp adapter.
@@ -137,32 +150,62 @@ class SanicDispatcherMiddleware(object):
             http_response.body = bytes(body_bytes)
         return response_callback(http_response)
 
-    async def __call__(self, request, response_callback):
-        script = str(request.url).split('?', 1)[0]
-        path_info = ''
-        while '/' in script:
-            if script in self.mounts:
-                application = self.mounts[script]
+    @staticmethod
+    def get_request_scheme(request):
+        try:
+            if request.headers.get('upgrade') == 'websocket':
+                scheme = b'ws'
+            elif request.transport.get_extra_info('sslcontext'):
+                scheme = b'https'
+            else:
+                scheme = b'http'
+        except (AttributeError, KeyError):
+            scheme = b'http'
+        return scheme
+
+    async def __call__(self, request, write_callback, stream_callback):
+        # Assume at this point that we have no app. So we cannot know if we are on Websocket or not.
+        scheme = self.get_request_scheme(request)
+        host = request.host.encode('utf-8')
+        path = request._parsed_url.path
+        port = request._parsed_url.port
+        query_string = request._parsed_url.query
+        fragment = request._parsed_url.fragment
+        userinfo = request._parsed_url.userinfo
+        script = path
+        path_info = b''
+        script_str = script.decode('utf-8')
+        while b'/' in script:
+            script_str = script.decode('utf-8')
+            if script_str in self.mounts:
+                application = self.mounts[script_str]
                 break
-            script, last_item = script.rsplit('/', 1)
-            path_info = '/%s%s' % (last_item, path_info)
+            script, last_item = script.rsplit(b'/', 1)
+            path_info = b'/%s%s' % (last_item, path_info)
         else:
-            application = self.mounts.get(script, None)
-        request.url = path_info if len(path_info) > 0 else '/'
-
+            script_str = script.decode('utf-8')
+            application = self.mounts.get(script_str, None)
+        request._parsed_url = SanicCompatURL(scheme, host, port, path_info, query_string, fragment, userinfo)
+        request.parsed_args = None  # To trigger re-parse args
+        path = request.path
         if application is None:  # no child matches, call the parent
-            return await self.parent_handle_request(request, response_callback)
+            return await self.parent_handle_request(request, write_callback, stream_callback)
 
-        parent_app = self.parent_app
-        real_response_callback = response_callback
-
+        real_write_callback = write_callback
+        real_stream_callback = stream_callback
         response = False
-
-        def _response_callback(child_response):
+        streaming_response = False
+        def _write_callback(child_response):
             nonlocal response
             response = child_response
 
-        replace_response_callback = _response_callback
+        def _stream_callback(child_stream):
+            nonlocal streaming_response
+            streaming_response = child_stream
+
+        replaced_write_callback = _write_callback
+        replaced_stream_callback = _stream_callback
+        parent_app = self.parent_app
         if application.apply_middleware and parent_app.request_middleware:
             request.app = parent_app
             for middleware in parent_app.request_middleware:
@@ -171,11 +214,12 @@ class SanicDispatcherMiddleware(object):
                     response = await response
                 if response:
                     break
-        if not response:
+        if not response and not streaming_response:
             if isinstance(application, WsgiApplication):  # child is wsgi_app
-                self._call_wsgi_app(script, path_info, request, application.app, replace_response_callback)
+                self._call_wsgi_app(script_str, path, request, application.app, replaced_write_callback)
             else:  # must be a sanic application
-                await application.app.handle_request(request, replace_response_callback)
+                request.app = None  # Remove parent app from request to child app
+                await application.app.handle_request(request, replaced_write_callback, replaced_stream_callback)
 
         if application.apply_middleware and parent_app.response_middleware:
             request.app = parent_app
@@ -189,8 +233,9 @@ class SanicDispatcherMiddleware(object):
 
         while isawaitable(response):
             response = await response
-
-        return real_response_callback(response)
+        if streaming_response:
+            return real_stream_callback(streaming_response)
+        return real_write_callback(response)
 
 
 class SanicDispatcherMiddlewareController(object):
@@ -245,16 +290,17 @@ class SanicDispatcherMiddlewareController(object):
         dispatcher = SanicDispatcherMiddleware(self.parent_app, self.parent_handle_request, self.applications)
         self.parent_app.handle_request = dispatcher
 
-    async def handle_request(self, request, response_callback):
+    async def handle_request(self, request, write_callback, stream_callback):
         """
         This is only called as a backup handler if _update_request_handler was not yet called.
         :param request:
-        :param response_callback:
+        :param write_callback:
+        :param stream_callback:
         :return:
         """
         dispatcher = SanicDispatcherMiddleware(self.parent_app, self.parent_handle_request, self.applications)
         self.parent_app.handle_request = dispatcher  # save it for next time
-        retval = dispatcher(request, response_callback)
+        retval = dispatcher(request, write_callback, stream_callback)
         if isawaitable(retval):
             retval = await retval
         return retval
