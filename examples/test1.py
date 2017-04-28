@@ -38,6 +38,7 @@ def index():
 
 dispatcher.register_sanic_application(child_sanic_app, '/sanicchild', apply_middleware=True)
 dispatcher.register_wsgi_application(child_flask_app.wsgi_app, '/flaskchild', apply_middleware=True)
+dispatcher.unregister_application(child_sanic_app)
 
 if __name__ == "__main__":
     app.run(port=8001, debug=True)

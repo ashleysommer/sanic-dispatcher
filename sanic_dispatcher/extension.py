@@ -28,7 +28,13 @@ class SanicApplication(object):
         self.app = app
         self.apply_middleware = apply_middleware
 
+
 class SanicCompatURL(object):
+    """
+    This class exists because the sanic native URL type is private (a non-exposed C module)
+    and all of its components are read-only. We need to modify the URL path in the dispatcher
+    so we build a feature-compatible writable class of our own to use instead.
+    """
     __slots__ = ('schema', 'host', 'port', 'path', 'query', 'fragment', 'userinfo')
 
     def __init__(self, schema, host, port, path, query, fragment, userinfo):
@@ -41,10 +47,11 @@ class SanicCompatURL(object):
         self.userinfo = userinfo
 
 
-
 class SanicDispatcherMiddleware(object):
-    """Is a multi-application dispatcher, and also acts as a sanic-to-wsgiApp adapter.
-    Is based on the DispatcherMiddleware class in werkzeug"""
+    """
+    A multi-application dispatcher, and also acts as a sanic-to-wsgiApp adapter.
+    Based on the DispatcherMiddleware class in werkzeug.
+    """
 
     __slots__ = ['parent_app', 'parent_handle_request', 'mounts']
 
@@ -275,11 +282,36 @@ class SanicDispatcherMiddlewareController(object):
         :param apply_middleware:
         :return:
         """
+
         registered_service_url = ''
         if self.url_prefix is not None:
             registered_service_url += self.url_prefix
         registered_service_url += url_prefix
         self.applications[registered_service_url] = WsgiApplication(application, apply_middleware)
+        self._update_request_handler()
+
+    def unregister_application(self, application, all_matches=False):
+        if isinstance(application, (SanicApplication, WsgiApplication)):
+            application = application.app
+        urls_to_unregister = []
+        for url, reg_application in self.applications.items():
+            if reg_application.app == application:
+                urls_to_unregister.append(url)
+                if not all_matches:
+                    break
+        for url in urls_to_unregister:
+            del self.applications[url]
+        self._update_request_handler()
+
+    def unregister_prefix(self, url_prefix):
+        registered_service_url = ''
+        if self.url_prefix is not None:
+            registered_service_url += self.url_prefix
+        registered_service_url += url_prefix
+        try:
+            del self.applications[registered_service_url]
+        except KeyError:
+            pass
         self._update_request_handler()
 
     def _update_request_handler(self):
