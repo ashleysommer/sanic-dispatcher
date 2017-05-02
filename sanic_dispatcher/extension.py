@@ -53,12 +53,13 @@ class SanicDispatcherMiddleware(object):
     Based on the DispatcherMiddleware class in werkzeug.
     """
 
-    __slots__ = ['parent_app', 'parent_handle_request', 'mounts']
+    __slots__ = ['parent_app', 'parent_handle_request', 'mounts', 'hosts']
 
-    def __init__(self, parent_app, parent_handle_request, mounts=None):
+    def __init__(self, parent_app, parent_handle_request, mounts=None, hosts=None):
         self.parent_app = parent_app
         self.parent_handle_request = parent_handle_request
         self.mounts = mounts or {}
+        self.hosts = frozenset(hosts) if hosts else frozenset()
 
     # noinspection PyMethodMayBeStatic
     def _call_wsgi_app(self, script_name, path_info, request, wsgi_app, response_callback):
@@ -170,18 +171,19 @@ class SanicDispatcherMiddleware(object):
             scheme = b'http'
         return scheme
 
-    async def __call__(self, request, write_callback, stream_callback):
-        # Assume at this point that we have no app. So we cannot know if we are on Websocket or not.
+    def _get_application_by_route(self, request, use_host=False):
+        host = request.headers.get('Host', '')
+        host_bytes = host.encode('utf-8')
         scheme = self.get_request_scheme(request)
-        host = request.host.encode('utf-8')
         path = request._parsed_url.path
         port = request._parsed_url.port
         query_string = request._parsed_url.query
         fragment = request._parsed_url.fragment
         userinfo = request._parsed_url.userinfo
         script = path
+        if use_host:
+            script = b'%s%s' % (host_bytes, script)
         path_info = b''
-        script_str = script.decode('utf-8')
         while b'/' in script:
             script_str = script.decode('utf-8')
             if script_str in self.mounts:
@@ -192,9 +194,21 @@ class SanicDispatcherMiddleware(object):
         else:
             script_str = script.decode('utf-8')
             application = self.mounts.get(script_str, None)
-        request._parsed_url = SanicCompatURL(scheme, host, port, path_info, query_string, fragment, userinfo)
-        request.parsed_args = None  # To trigger re-parse args
-        path = request.path
+        if application is not None:
+            request._parsed_url = SanicCompatURL(scheme, host_bytes, port,
+                                                 path_info, query_string, fragment, userinfo)
+            request.parsed_args = None  # To trigger re-parse args
+            path = request.path
+        return application, script_str, path
+
+    async def __call__(self, request, write_callback, stream_callback):
+        # Assume at this point that we have no app. So we cannot know if we are on Websocket or not.
+        if self.hosts and len(self.hosts) > 0:
+            application, script, path = self._get_application_by_route(request, True)
+            if application is None:
+                application, script, path = self._get_application_by_route(request, False)
+        else:
+            application, script, path = self._get_application_by_route(request)
         if application is None:  # no child matches, call the parent
             return await self.parent_handle_request(request, write_callback, stream_callback)
 
@@ -223,7 +237,7 @@ class SanicDispatcherMiddleware(object):
                     break
         if not response and not streaming_response:
             if isinstance(application, WsgiApplication):  # child is wsgi_app
-                self._call_wsgi_app(script_str, path, request, application.app, replaced_write_callback)
+                self._call_wsgi_app(script, path, request, application.app, replaced_write_callback)
             else:  # must be a sanic application
                 request.app = None  # Remove parent app from request to child app
                 await application.app.handle_request(request, replaced_write_callback, replaced_stream_callback)
@@ -246,9 +260,9 @@ class SanicDispatcherMiddleware(object):
 
 
 class SanicDispatcherMiddlewareController(object):
-    __slots__ = ['parent_app', 'parent_handle_request', 'applications', 'url_prefix']
+    __slots__ = ['parent_app', 'parent_handle_request', 'applications', 'url_prefix', 'filter_host', 'hosts']
 
-    def __init__(self, app, url_prefix=None):
+    def __init__(self, app, url_prefix=None, host=None):
         """
         :param Sanic app:
         :param url_prefix:
@@ -256,37 +270,61 @@ class SanicDispatcherMiddlewareController(object):
         self.parent_app = app
         self.applications = {}
         self.url_prefix = None if url_prefix is None else str(url_prefix).rstrip('/')
+        self.hosts = set()
+        if host:
+            self.filter_host = host
+            self.hosts.add(host)
+        else:
+            self.filter_host = None
         # Woo, monkey-patch!
         self.parent_handle_request = app.handle_request
         self.parent_app.handle_request = self.handle_request
 
-    def register_sanic_application(self, application, url_prefix, apply_middleware=False):
+    def _determine_uri(self, url_prefix, host=None):
+
+        uri = ''
+        if self.url_prefix is not None:
+            uri = self.url_prefix
+        if host is not None:
+            uri = str(host) + uri
+            self.hosts.add(host)
+        elif self.filter_host is not None:
+            uri = str(self.filter_host) + uri
+        uri += url_prefix
+        return uri
+
+    def register_sanic_application(self, application, url_prefix, host=None, apply_middleware=False):
         """
         :param Sanic application:
         :param url_prefix:
+        :param host:
         :param apply_middleware:
         :return:
         """
         assert isinstance(application, Sanic), "Pass only instances of Sanic to register_sanic_application."
-        registered_service_url = ''
-        if self.url_prefix is not None:
-            registered_service_url += self.url_prefix
-        registered_service_url += url_prefix
+        if host is not None and isinstance(host, (list, set)):
+            for _host in host:
+                self.register_sanic_application(application, url_prefix, host=_host,
+                                                apply_middleware=apply_middleware)
+                return
+        registered_service_url = self._determine_uri(url_prefix, host)
         self.applications[registered_service_url] = SanicApplication(application, apply_middleware)
         self._update_request_handler()
 
-    def register_wsgi_application(self, application, url_prefix, apply_middleware=False):
+    def register_wsgi_application(self, application, url_prefix, host=None, apply_middleware=False):
         """
         :param application:
         :param url_prefix:
         :param apply_middleware:
         :return:
         """
+        if host is not None and isinstance(host, (list, set)):
+            for _host in host:
+                self.register_wsgi_application(application, url_prefix, host=_host,
+                                               apply_middleware=apply_middleware)
+                return
 
-        registered_service_url = ''
-        if self.url_prefix is not None:
-            registered_service_url += self.url_prefix
-        registered_service_url += url_prefix
+        registered_service_url = self._determine_uri(url_prefix, host)
         self.applications[registered_service_url] = WsgiApplication(application, apply_middleware)
         self._update_request_handler()
 
@@ -319,7 +357,8 @@ class SanicDispatcherMiddlewareController(object):
         Rebuilds the SanicDispatcherMiddleware every time a new application is registered
         :return:
         """
-        dispatcher = SanicDispatcherMiddleware(self.parent_app, self.parent_handle_request, self.applications)
+        dispatcher = SanicDispatcherMiddleware(self.parent_app, self.parent_handle_request, self.applications,
+                                               self.hosts)
         self.parent_app.handle_request = dispatcher
 
     async def handle_request(self, request, write_callback, stream_callback):
