@@ -1,6 +1,6 @@
-#Sanic-Dispatcher
-###A Dispatcher extension for Sanic that also acts as a Sanic-to-WSGI adapter 
-#
+# Sanic-Dispatcher
+### A Dispatcher extension for Sanic that also acts as a Sanic-to-WSGI adapter 
+
 Allows you to do this: *(seriously)*
 ```python
 from sanic import Sanic, response
@@ -40,8 +40,8 @@ dispatcher.register_wsgi_application(child_flask_app.wsgi_app, '/flaskchild', ap
 if __name__ == "__main__":
     app.run(port=8001, debug=True)
 ```
-#
-##How To Use
+
+## How To Use
 First make a Sanic application the way you normally do:
 ```python
 from sanic import Sanic
