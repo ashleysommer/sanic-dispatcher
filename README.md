@@ -41,7 +41,12 @@ if __name__ == "__main__":
     app.run(port=8001, debug=True)
 ```
 
+## Installation 
+
+    pip install Sanic-Dispatcher
+
 ## How To Use
+
 First make a Sanic application the way you normally do:
 ```python
 from sanic import Sanic
