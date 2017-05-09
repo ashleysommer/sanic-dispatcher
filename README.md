@@ -1,5 +1,5 @@
 # Sanic-Dispatcher
-## A Dispatcher extension for Sanic that also acts as a Sanic-to-WSGI adapter 
+### A Dispatcher extension for Sanic that also acts as a Sanic-to-WSGI adapter 
 
 Allows you to do this: *(seriously)*
 ```python
