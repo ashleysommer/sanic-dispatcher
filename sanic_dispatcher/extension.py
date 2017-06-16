@@ -122,10 +122,10 @@ class SanicDispatcherMiddleware(object):
 
         split_host = host.split(':', 1)
         server_name = split_host[0]
-        if len(split_host) > 0:
+        if len(split_host) > 1:
             server_port = split_host[1]
         else:
-            raise RuntimeError("Did not get a Port number in the url string!")
+            server_port = 80  # TODO: Find a better way of determining the port number when not provided
         environ['SERVER_PORT'] = server_port
         environ['SERVER_NAME'] = server_name
         environ['SERVER_PROTOCOL'] = 'HTTP/1.1' if request.version == "1.1" else 'HTTP/1.0'
