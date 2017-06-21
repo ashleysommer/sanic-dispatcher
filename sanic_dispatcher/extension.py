@@ -107,7 +107,9 @@ class SanicDispatcherMiddleware(object):
         original_script_name = environ.get('SCRIPT_NAME', '')
         environ['SCRIPT_NAME'] = original_script_name + script_name
         environ['PATH_INFO'] = path_info
-        if 'host' in request.headers:
+        if request._parsed_url and request._parsed_url.host is not None:
+            host = request._parsed_url.host.decode('utf-8')
+        elif 'host' in request.headers:
             host = request.headers['host']
         else:
             host = 'localhost:80'
@@ -122,10 +124,12 @@ class SanicDispatcherMiddleware(object):
 
         split_host = host.split(':', 1)
         server_name = split_host[0]
-        if len(split_host) > 1:
+        if request._parsed_url and request._parsed_url.port is not None:
+            server_port = request._parsed_url.port.decode('ascii')
+        elif len(split_host) > 1:
             server_port = split_host[1]
         else:
-            server_port = 80  # TODO: Find a better way of determining the port number when not provided
+            server_port = '80'  # TODO: Find a better way of determining the port number when not provided
         environ['SERVER_PORT'] = server_port
         environ['SERVER_NAME'] = server_name
         environ['SERVER_PROTOCOL'] = 'HTTP/1.1' if request.version == "1.1" else 'HTTP/1.0'
@@ -173,7 +177,6 @@ class SanicDispatcherMiddleware(object):
 
     def _get_application_by_route(self, request, use_host=False):
         host = request.headers.get('Host', '')
-        host_bytes = host.encode('utf-8')
         scheme = self.get_request_scheme(request)
         path = request._parsed_url.path
         port = request._parsed_url.port
@@ -181,14 +184,21 @@ class SanicDispatcherMiddleware(object):
         fragment = request._parsed_url.fragment
         userinfo = request._parsed_url.userinfo
         script = path
+        if ':' in host and port is None:
+            (host, port) = host.split(':', 1)[0:2]
+            port = port.encode('ascii')
+        host_bytes = host.encode('utf-8')
+
         if use_host:
             script = b'%s%s' % (host_bytes, script)
         path_info = b''
         while b'/' in script:
             script_str = script.decode('utf-8')
-            if script_str in self.mounts:
+            try:
                 application = self.mounts[script_str]
                 break
+            except KeyError:
+                pass
             script, last_item = script.rsplit(b'/', 1)
             path_info = b'/%s%s' % (last_item, path_info)
         else:
@@ -204,9 +214,9 @@ class SanicDispatcherMiddleware(object):
     async def __call__(self, request, write_callback, stream_callback):
         # Assume at this point that we have no app. So we cannot know if we are on Websocket or not.
         if self.hosts and len(self.hosts) > 0:
-            application, script, path = self._get_application_by_route(request, True)
+            application, script, path = self._get_application_by_route(request, use_host=True)
             if application is None:
-                application, script, path = self._get_application_by_route(request, False)
+                application, script, path = self._get_application_by_route(request, use_host=False)
         else:
             application, script, path = self._get_application_by_route(request)
         if application is None:  # no child matches, call the parent
@@ -302,11 +312,14 @@ class SanicDispatcherMiddlewareController(object):
         :return:
         """
         assert isinstance(application, Sanic), "Pass only instances of Sanic to register_sanic_application."
+        if str(url_prefix).endswith('/'):
+            url_prefix = url_prefix[:-1]
         if host is not None and isinstance(host, (list, set)):
             for _host in host:
                 self.register_sanic_application(application, url_prefix, host=_host,
                                                 apply_middleware=apply_middleware)
                 return
+
         registered_service_url = self._determine_uri(url_prefix, host)
         self.applications[registered_service_url] = SanicApplication(application, apply_middleware)
         self._update_request_handler()
@@ -369,7 +382,8 @@ class SanicDispatcherMiddlewareController(object):
         :param stream_callback:
         :return:
         """
-        dispatcher = SanicDispatcherMiddleware(self.parent_app, self.parent_handle_request, self.applications)
+        dispatcher = SanicDispatcherMiddleware(self.parent_app, self.parent_handle_request, self.applications,
+                                               self.hosts)
         self.parent_app.handle_request = dispatcher  # save it for next time
         retval = dispatcher(request, write_callback, stream_callback)
         if isawaitable(retval):
