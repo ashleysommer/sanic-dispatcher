@@ -10,6 +10,7 @@
 from inspect import isawaitable
 from io import BytesIO
 from sanic import Sanic
+from sanic.exceptions import URLBuildError
 from sanic.response import HTTPResponse
 
 
@@ -270,7 +271,8 @@ class SanicDispatcherMiddleware(object):
 
 
 class SanicDispatcherMiddlewareController(object):
-    __slots__ = ['parent_app', 'parent_handle_request', 'applications', 'url_prefix', 'filter_host', 'hosts']
+    __slots__ = ['parent_app', 'parent_handle_request', 'parent_url_for','applications', 'url_prefix', 'filter_host',
+                 'hosts']
 
     def __init__(self, app, url_prefix=None, host=None):
         """
@@ -288,7 +290,9 @@ class SanicDispatcherMiddlewareController(object):
             self.filter_host = None
         # Woo, monkey-patch!
         self.parent_handle_request = app.handle_request
+        self.parent_url_for = app.url_for
         self.parent_app.handle_request = self.handle_request
+        self.parent_app.url_for = self.patched_url_for
 
     def _determine_uri(self, url_prefix, host=None):
 
@@ -318,7 +322,7 @@ class SanicDispatcherMiddlewareController(object):
             for _host in host:
                 self.register_sanic_application(application, url_prefix, host=_host,
                                                 apply_middleware=apply_middleware)
-                return
+            return
 
         registered_service_url = self._determine_uri(url_prefix, host)
         self.applications[registered_service_url] = SanicApplication(application, apply_middleware)
@@ -331,11 +335,13 @@ class SanicDispatcherMiddlewareController(object):
         :param apply_middleware:
         :return:
         """
+        if str(url_prefix).endswith('/'):
+            url_prefix = url_prefix[:-1]
         if host is not None and isinstance(host, (list, set)):
             for _host in host:
                 self.register_wsgi_application(application, url_prefix, host=_host,
                                                apply_middleware=apply_middleware)
-                return
+            return
 
         registered_service_url = self._determine_uri(url_prefix, host)
         self.applications[registered_service_url] = WsgiApplication(application, apply_middleware)
@@ -354,11 +360,14 @@ class SanicDispatcherMiddlewareController(object):
             del self.applications[url]
         self._update_request_handler()
 
-    def unregister_prefix(self, url_prefix):
-        registered_service_url = ''
-        if self.url_prefix is not None:
-            registered_service_url += self.url_prefix
-        registered_service_url += url_prefix
+    def unregister_prefix(self, url_prefix, host=None):
+        if str(url_prefix).endswith('/'):
+            url_prefix = url_prefix[:-1]
+        if host is not None and isinstance(host, (list, set)):
+            for _host in host:
+                self.unregister_prefix(url_prefix, host=_host)
+            return
+        registered_service_url = self._determine_uri(url_prefix, host)
         try:
             del self.applications[registered_service_url]
         except KeyError:
@@ -389,3 +398,67 @@ class SanicDispatcherMiddlewareController(object):
         if isawaitable(retval):
             retval = await retval
         return retval
+
+    def _dispatcher_url_for(self, view_name, **kwargs):
+        """
+        Checks all of the registered applications in the dispatcher for `url_for()`
+        :param str view_name:
+        :param kwargs:
+        :return:
+        """
+        for url_prefix, reg_application in self.applications.items():
+            app = reg_application.app
+            try:
+                _url_for = getattr(app, 'url_for', None)
+                if _url_for is None:
+                    continue
+                try:
+                    _url = _url_for(view_name, **kwargs)
+                except URLBuildError:
+                    continue
+                if _url is not None:
+                    return ''.join((url_prefix, str(_url)))
+            except (AssertionError, KeyError):
+                continue
+        return None
+
+    def patched_url_for(self, view_name, **kwargs):
+        """
+        When `url_for()` is called on the parent app, this gets called instead.
+        :param str view_name:
+        :param kwargs:
+        :return:
+        """
+        try:
+            url = self.parent_url_for(view_name, **kwargs)
+        except URLBuildError:
+            url = None
+        if url is None:
+            try:
+                url = self._dispatcher_url_for(view_name, **kwargs)
+            except URLBuildError:
+                url = None
+        if url is None:
+            raise URLBuildError("Url Not found in the Parent App, nor the Dispatcher routes")
+
+        return url
+
+    def url_for(self, view_name, **kwargs):
+        """
+        When `url_for()` is called on the dispatcher app, this gets called instead.
+        :param str view_name:
+        :param kwargs:
+        :return:
+        """
+        try:
+            url = self._dispatcher_url_for(view_name, **kwargs)
+        except URLBuildError:
+            url = None
+        if url is None:
+            try:
+                url = self.parent_url_for(view_name, **kwargs)
+            except URLBuildError:
+                url = None
+        if url is None:
+            raise URLBuildError("Url Not found in the Dispatcher routes, nor the Parent App")
+        return url
