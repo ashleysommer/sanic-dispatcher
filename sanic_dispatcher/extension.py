@@ -124,13 +124,16 @@ class SanicDispatcherMiddleware(object):
             environ['CONTENT_LENGTH'] = content_length
 
         split_host = host.split(':', 1)
+        host_has_port = len(split_host) > 1
         server_name = split_host[0]
         if request._parsed_url and request._parsed_url.port is not None:
             server_port = request._parsed_url.port.decode('ascii')
-        elif len(split_host) > 1:
+        elif host_has_port:
             server_port = split_host[1]
         else:
             server_port = '80'  # TODO: Find a better way of determining the port number when not provided
+        if (not host_has_port) and (server_port != '80'):
+            host = ":".join((host, server_port))
         environ['SERVER_PORT'] = server_port
         environ['SERVER_NAME'] = server_name
         environ['SERVER_PROTOCOL'] = 'HTTP/1.1' if request.version == "1.1" else 'HTTP/1.0'
