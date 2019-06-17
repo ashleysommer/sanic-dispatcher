@@ -11,7 +11,8 @@
 from setuptools import setup
 from os.path import join, dirname
 
-with open(join(dirname(__file__), 'sanic_dispatcher/version.py'), 'r') as f:
+with open(join(dirname(__file__), 'sanic_dispatcher/version.py'), 'r',
+          encoding='latin-1') as f:
     exec(f.read())
 
 with open(join(dirname(__file__), 'requirements.txt'), 'r') as f:

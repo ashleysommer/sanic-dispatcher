@@ -9,6 +9,8 @@
 
 from inspect import isawaitable
 from io import BytesIO
+from warnings import warn
+
 from sanic import Sanic
 from sanic.exceptions import URLBuildError
 from sanic.response import HTTPResponse
@@ -23,10 +25,11 @@ class WsgiApplication(object):
 
 
 class SanicApplication(object):
-    __slots__ = ['app', 'apply_middleware']
+    __slots__ = ['app', 'server_settings', 'apply_middleware']
 
     def __init__(self, app, apply_middleware=False):
         self.app = app
+        self.server_settings = {}
         self.apply_middleware = apply_middleware
 
 
@@ -274,8 +277,8 @@ class SanicDispatcherMiddleware(object):
 
 
 class SanicDispatcherMiddlewareController(object):
-    __slots__ = ['parent_app', 'parent_handle_request', 'parent_url_for','applications', 'url_prefix', 'filter_host',
-                 'hosts']
+    __slots__ = ['parent_app', 'parent_handle_request', 'parent_url_for', 'applications', 'url_prefix',
+                 'filter_host', 'hosts', 'started']
 
     def __init__(self, app, url_prefix=None, host=None):
         """
@@ -291,11 +294,57 @@ class SanicDispatcherMiddlewareController(object):
             self.hosts.add(host)
         else:
             self.filter_host = None
+        self.started = False
+        self.parent_app.register_listener(self._before_server_start_listener, 'before_server_start')
+        self.parent_app.register_listener(self._after_server_start_listener, 'after_server_start')
+        self.parent_app.register_listener(self._before_server_stop_listener, 'before_server_stop')
+        self.parent_app.register_listener(self._after_server_stop_listener, 'after_server_stop')
         # Woo, monkey-patch!
         self.parent_handle_request = app.handle_request
         self.parent_url_for = app.url_for
         self.parent_app.handle_request = self.handle_request
         self.parent_app.url_for = self.patched_url_for
+
+    async def _before_server_start_listener(self, app, loop):
+        print("before_start", app)
+        if self.started is True:
+            raise RuntimeError("Cannot start a sanic parent application more than once.")
+        for route, child_app in self.applications.items():
+            if isinstance(child_app, SanicApplication):
+                server_settings = child_app.app._helper(host=None, port=None, loop=loop, run_async=False)
+                child_app.server_settings = server_settings
+                await child_app.app.trigger_events(
+                    server_settings.get("before_start", []),
+                    server_settings.get("loop"),
+                )
+
+    async def _after_server_start_listener(self, app, loop):
+        self.started = True
+        for route, child_app in self.applications.items():
+            if isinstance(child_app, SanicApplication):
+                server_settings = child_app.server_settings
+                await child_app.app.trigger_events(
+                    server_settings.get("after_start", []),
+                    server_settings.get("loop"),
+                )
+
+    async def _before_server_stop_listener(self, app, loop):
+        for route, child_app in self.applications.items():
+            if isinstance(child_app, SanicApplication):
+                server_settings = child_app.server_settings
+                await child_app.app.trigger_events(
+                    server_settings.get("before_stop", []),
+                    server_settings.get("loop"),
+                )
+
+    async def _after_server_stop_listener(self, app, loop):
+        for route, child_app in self.applications.items():
+            if isinstance(child_app, SanicApplication):
+                server_settings = child_app.server_settings
+                await child_app.app.trigger_events(
+                    server_settings.get("after_stop", []),
+                    server_settings.get("loop"),
+                )
 
     def _determine_uri(self, url_prefix, host=None):
 
@@ -310,6 +359,14 @@ class SanicDispatcherMiddlewareController(object):
         uri += url_prefix
         return uri
 
+    def register_app(self, app, url_prefix, host=None, apply_middleware=False):
+        if isinstance(app, Sanic):
+            self.register_sanic_application(app, url_prefix, host=host,
+                                            apply_middleware=apply_middleware)
+        else:
+            self.register_wsgi_application(app, url_prefix, host=host,
+                                           apply_middleware=apply_middleware)
+
     def register_sanic_application(self, application, url_prefix, host=None, apply_middleware=False):
         """
         :param Sanic application:
@@ -318,7 +375,11 @@ class SanicDispatcherMiddlewareController(object):
         :param apply_middleware:
         :return:
         """
-        assert isinstance(application, Sanic), "Pass only instances of Sanic to register_sanic_application."
+        if self.started is True:
+            raise warn("Registering an application when the server is already started may work,"
+                       "but is not supported.")
+        assert isinstance(application, Sanic),\
+            "Pass only instances of Sanic to register_sanic_application."
         if str(url_prefix).endswith('/'):
             url_prefix = url_prefix[:-1]
         if host is not None and isinstance(host, (list, set)):
@@ -338,6 +399,8 @@ class SanicDispatcherMiddlewareController(object):
         :param apply_middleware:
         :return:
         """
+        if self.started is True:
+            raise RuntimeError("Cannot register an application when the server is already started.")
         if str(url_prefix).endswith('/'):
             url_prefix = url_prefix[:-1]
         if host is not None and isinstance(host, (list, set)):
