@@ -27,6 +27,7 @@ setup(
     author_email='ashleysommer@gmail.com',
     description="Multi-application dispatcher based on DispatcherMiddleware from the Werkzeug Project.",
     long_description=open('README.md').read(),
+    long_description_content_type="text/markdown",
     packages=['sanic_dispatcher'],
     zip_safe=False,
     include_package_data=True,
