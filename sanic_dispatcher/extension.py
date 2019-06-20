@@ -14,6 +14,8 @@ from warnings import warn
 from sanic import Sanic
 from sanic.exceptions import URLBuildError
 from sanic.response import HTTPResponse
+from sanic.server import HttpProtocol
+from sanic.websocket import WebSocketProtocol
 
 
 class WsgiApplication(object):
@@ -309,14 +311,24 @@ class SanicDispatcherMiddlewareController(object):
         print("before_start", app)
         if self.started is True:
             raise RuntimeError("Cannot start a sanic parent application more than once.")
+        has_ws = False
         for route, child_app in self.applications.items():
             if isinstance(child_app, SanicApplication):
-                server_settings = child_app.app._helper(host=None, port=None, loop=loop, run_async=False)
+                s_app = child_app.app
+                is_ws = getattr(s_app, 'websocket_enabled', False)
+                protocol = WebSocketProtocol if is_ws else HttpProtocol
+                server_settings = s_app._helper(host=None, port=None, loop=loop,
+                                                protocol=protocol, run_async=False)
                 child_app.server_settings = server_settings
-                await child_app.app.trigger_events(
+                await s_app.trigger_events(
                     server_settings.get("before_start", []),
                     server_settings.get("loop"),
                 )
+                has_ws = has_ws or is_ws
+        if not getattr(app, 'websocket_enabled', False) and has_ws:
+            raise RuntimeError(
+                "Found child apps with Websockets enabled, but parent app is not Websockets enabled.\n"
+                "Add parent_app.enable_websocket() before starting the app.")
 
     async def _after_server_start_listener(self, app, loop):
         self.started = True
