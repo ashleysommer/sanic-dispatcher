@@ -6,16 +6,30 @@
     :copyright: (c) 2017 by Ashley Sommer (based on DispatcherMiddleware in the Werkzeug Project).
     :license: MIT, see LICENSE for more details.
 """
-
+from collections import defaultdict
 from inspect import isawaitable
 from io import BytesIO
 from warnings import warn
+try:
+    from setuptools.extern import packaging
+except ImportError:
+    from pkg_resources.extern import packaging
 
-from sanic import Sanic
+from sanic import Sanic, __version__ as sanic_version
 from sanic.exceptions import URLBuildError
 from sanic.response import HTTPResponse
 from sanic.server import HttpProtocol
 from sanic.websocket import WebSocketProtocol
+
+
+SANIC_VERSION = packaging.version.parse(sanic_version)
+SANIC_0_7_0 = packaging.version.parse('0.7.0')
+if SANIC_VERSION < SANIC_0_7_0:
+    raise RuntimeError("Please use Sanic v0.7.0 or greater with this extension.")
+SANIC_19_03_0 = packaging.version.parse('19.3.0')
+IS_19_03 = SANIC_VERSION >= SANIC_19_03_0
+if IS_19_03:
+    from sanic.request import RequestParameters
 
 
 class WsgiApplication(object):
@@ -216,7 +230,11 @@ class SanicDispatcherMiddleware(object):
         if application is not None:
             request._parsed_url = SanicCompatURL(scheme, host_bytes, port,
                                                  path_info, query_string, fragment, userinfo)
-            request.parsed_args = None  # To trigger re-parse args
+            if IS_19_03:
+                # To trigger re-parse args
+                request.parsed_args = defaultdict(RequestParameters)
+            else:
+                request.parsed_args = None  # To trigger re-parse args
             path = request.path
         return application, script_str, path
 
@@ -254,12 +272,13 @@ class SanicDispatcherMiddleware(object):
                     response = await response
                 if response:
                     break
+        child_app = application.app
         if not response and not streaming_response:
             if isinstance(application, WsgiApplication):  # child is wsgi_app
-                self._call_wsgi_app(script, path, request, application.app, replaced_write_callback)
+                self._call_wsgi_app(script, path, request, child_app, replaced_write_callback)
             else:  # must be a sanic application
-                request.app = None  # Remove parent app from request to child app
-                await application.app.handle_request(request, replaced_write_callback, replaced_stream_callback)
+                request.app = child_app
+                await child_app.handle_request(request, replaced_write_callback, replaced_stream_callback)
 
         if application.apply_middleware and parent_app.response_middleware:
             request.app = parent_app
