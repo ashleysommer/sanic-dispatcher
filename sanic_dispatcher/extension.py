@@ -75,16 +75,16 @@ class SanicDispatcherMiddleware(object):
 
     __slots__ = ['parent_app', 'parent_handle_request', 'mounts', 'hosts']
 
+    use_wsgi_threads = True
+
     def __init__(self, parent_app, parent_handle_request, mounts=None, hosts=None):
         self.parent_app = parent_app
         self.parent_handle_request = parent_handle_request
         self.mounts = mounts or {}
         self.hosts = frozenset(hosts) if hosts else frozenset()
 
-    # noinspection PyMethodMayBeStatic
-    def _call_wsgi_app(self, script_name, path_info, request, wsgi_app, response_callback):
-        """Even though the lint says that this method can be static, it really can't. The internal functions need to be
-        unique for every call to `_call_wsgi_app`, so a static method would not work here."""
+    @staticmethod
+    def _call_wsgi_app(script_name, path_info, request, wsgi_app, response_callback):
         http_response = None
         body_bytes = bytearray()
 
@@ -185,6 +185,15 @@ class SanicDispatcherMiddleware(object):
             http_response.body = bytes(body_bytes)
         return response_callback(http_response)
 
+    async def call_wsgi_app(self, script_name, path_info, request, wsgi_app, response_callback):
+        if self.use_wsgi_threads:
+            return await self.parent_app.loop.run_in_executor(
+                None, self._call_wsgi_app, script_name, path_info, request,
+                wsgi_app, response_callback)
+        else:
+            return self._call_wsgi_app(script_name, path_info, request,
+                                       wsgi_app, response_callback)
+
     @staticmethod
     def get_request_scheme(request):
         try:
@@ -275,7 +284,8 @@ class SanicDispatcherMiddleware(object):
         child_app = application.app
         if not response and not streaming_response:
             if isinstance(application, WsgiApplication):  # child is wsgi_app
-                self._call_wsgi_app(script, path, request, child_app, replaced_write_callback)
+                await self.call_wsgi_app(script, path, request,
+                                         child_app, replaced_write_callback)
             else:  # must be a sanic application
                 request.app = child_app
                 await child_app.handle_request(request, replaced_write_callback, replaced_stream_callback)
@@ -327,7 +337,6 @@ class SanicDispatcherMiddlewareController(object):
         self.parent_app.url_for = self.patched_url_for
 
     async def _before_server_start_listener(self, app, loop):
-        print("before_start", app)
         if self.started is True:
             raise RuntimeError("Cannot start a sanic parent application more than once.")
         has_ws = False
@@ -350,7 +359,12 @@ class SanicDispatcherMiddlewareController(object):
                 "Add parent_app.enable_websocket() before starting the app.")
 
     async def _after_server_start_listener(self, app, loop):
+        is_asgi = getattr(app, 'asgi', False)
+        if is_asgi:
+            print("Sanic-Dispatcher has not been tested on ASGI apps. It may not work correctly.")
+
         self.started = True
+
         for route, child_app in self.applications.items():
             if isinstance(child_app, SanicApplication):
                 server_settings = child_app.server_settings
@@ -378,7 +392,6 @@ class SanicDispatcherMiddlewareController(object):
                 )
 
     def _determine_uri(self, url_prefix, host=None):
-
         uri = ''
         if self.url_prefix is not None:
             uri = self.url_prefix
