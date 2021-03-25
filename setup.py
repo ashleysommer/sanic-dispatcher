@@ -4,7 +4,7 @@
     ~~~~
     A Dispatcher extension for Sanic which also acts as a Sanic-to-WSGI adapter
 
-    :copyright: (c) 2017 by Ashley Sommer (based on DispatcherMiddleware in Workzeug).
+    :copyright: (c) 2017-2021 by Ashley Sommer (based on DispatcherMiddleware in Workzeug).
     :license: MIT, see LICENSE for more details.
 """
 
@@ -44,6 +44,7 @@ setup(
         'Operating System :: OS Independent',
         'Programming Language :: Python',
         'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3 :: Only',
         'Programming Language :: Python :: Implementation :: CPython',
         'Programming Language :: Python :: Implementation :: PyPy',
         'Topic :: Internet :: WWW/HTTP :: Dynamic Content',

@@ -1,19 +1,52 @@
 sudo: false
-cache:
-- pip
 language: python
-python:
-- '3.6'
-env:
-- SANIC=0.7.0
+cache:
+  directories:
+    - $HOME/.cache/pip
+matrix:
+  include:
+    - env: TOX_ENV=py35
+      python: 3.5
+      dist: xenial
+      sudo: true
+      name: "Python 3.5"
+    - env: TOX_ENV=py36
+      python: 3.6
+      dist: xenial
+      sudo: true
+      name: "Python 3.6"
+    - env: TOX_ENV=py37
+      python: 3.7
+      dist: xenial
+      sudo: true
+      name: "Python 3.7"
+    - env: TOX_ENV=py38
+      python: 3.8
+      dist: xenial
+      sudo: true
+      name: "Python 3.8"
+    - env: TOX_ENV=py39
+      python: 3.9
+      dist: bionic
+      sudo: true
+      name: "Python 3.9"
+    - env: TOX_ENV=type-checking
+      python: 3.7
+      name: "Python 3.7 Type checks"
+    - env: TOX_ENV=type-checking
+      python: 3.8
+      name: "Python 3.8 Type checks"
+    - env: TOX_ENV=type-checking
+      python: 3.9
+      dist: bionic
+      name: "Python 3.9 Type checks"
+
 install:
-- pip install -U setuptools pep8 coverage docutils pygments sanic==$SANIC
-script:
-- coverage erase
-- nosetests --with-coverage --cover-package=sanic_dispatcher
-- python setup.py clean build install
-#after_success:
-#- pep8 sanic_cors.py
+  - pip install -U tox
+  - pip install codecov
+script: travis_retry tox -e $TOX_ENV
+after_success:
+  - codecov
 deploy:
   provider: pypi
   user: ashleysommer

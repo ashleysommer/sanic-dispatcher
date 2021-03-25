@@ -17,20 +17,28 @@ except ImportError:
 
 from sanic import Sanic, __version__ as sanic_version
 from sanic.exceptions import URLBuildError
-from sanic.response import HTTPResponse
+from sanic.response import HTTPResponse, BaseHTTPResponse
 from sanic.server import HttpProtocol
 from sanic.websocket import WebSocketProtocol
-
 
 SANIC_VERSION = packaging.version.parse(sanic_version)
 SANIC_0_7_0 = packaging.version.parse('0.7.0')
 if SANIC_VERSION < SANIC_0_7_0:
     raise RuntimeError("Please use Sanic v0.7.0 or greater with this extension.")
 SANIC_19_03_0 = packaging.version.parse('19.3.0')
+SANIC_18_12_0 = packaging.version.parse('18.12.0')
+SANIC_21_03_0 = packaging.version.parse('21.03.0')
 IS_19_03 = SANIC_VERSION >= SANIC_19_03_0
+IS_18_12 = SANIC_VERSION >= SANIC_18_12_0
+IS_21_03 = SANIC_VERSION >= SANIC_21_03_0
 if IS_19_03:
     from sanic.request import RequestParameters
-
+    from sanic.log import error_logger
+else:
+    import logging
+    error_logger = logging.getLogger("sanic.error")
+if IS_21_03:
+    from sanic.compat import CancelledErrors
 
 class WsgiApplication(object):
     __slots__ = ['app', 'apply_middleware']
@@ -66,6 +74,66 @@ class SanicCompatURL(object):
         self.fragment = fragment
         self.userinfo = userinfo
 
+class SanicComatRequest(object):
+    __slots__ = ("orig_req", "parent_app")
+    def __init__(self, orig_req, parent_app):
+        self.orig_req = orig_req
+        self.parent_app = parent_app
+
+    def __getattr__(self, item):
+        if item in SanicComatRequest.__slots__:
+            return object.__getattribute__(self, item)
+        return getattr(self.orig_req, item)
+
+    def __setattr__(self, key, val):
+        if key in SanicComatRequest.__slots__:
+            return object.__setattr__(self, key, val)
+        return setattr(self.orig_req, key, val)
+
+    async def respond(
+            self,
+            response=None,
+            *args,
+            status=200,
+            headers=None,
+            content_type=None,
+    ):
+        # From Sanic 21.03
+        # This logic of determining which response to use is subject to change
+        if response is None:
+            response = (self.stream and self.stream.response) or HTTPResponse(
+                status=status,
+                headers=headers,
+                content_type=content_type,
+            )
+        # Connect the response
+        if isinstance(response, BaseHTTPResponse) and self.stream:
+            response = self.stream.respond(response)
+        # Run child's response middleware
+        try:
+            response = await self.app._run_response_middleware(
+                self, response, request_name=self.name
+            )
+        except CancelledErrors:
+            raise
+        except Exception:
+            error_logger.exception(
+                "Exception occurred in one of response middleware handlers"
+            )
+        parent_app = self.parent_app
+        if parent_app.response_middleware:
+            self.orig_req.app = parent_app
+            for _middleware in parent_app.response_middleware:
+                _response = _middleware(self, response)
+                if isawaitable(_response):
+                    _response = await _response
+                if _response:
+                    response = _response
+                    if isinstance(response, BaseHTTPResponse):
+                        response = self.stream.respond(response)
+        return response
+
+
 
 class SanicDispatcherMiddleware(object):
     """
@@ -84,7 +152,7 @@ class SanicDispatcherMiddleware(object):
         self.hosts = frozenset(hosts) if hosts else frozenset()
 
     @staticmethod
-    def _call_wsgi_app(script_name, path_info, request, wsgi_app, response_callback):
+    def _call_wsgi(script_name, path_info, request, wsgi_app, response_callback):
         http_response = None
         body_bytes = bytearray()
 
@@ -165,7 +233,7 @@ class SanicDispatcherMiddleware(object):
         try:
             wsgi_return = wsgi_app(environ, _start_response)
         except Exception as e:
-            print(e)
+            error_logger.exception(e)
             raise e
         if http_response is None:
             http_response = HTTPResponse("WSGI call error.", 500)
@@ -183,17 +251,25 @@ class SanicDispatcherMiddleware(object):
                             body_part = str(body_part).encode()
                     body_bytes.extend(body_part)
             http_response.body = bytes(body_bytes)
-        return response_callback(http_response)
+        if response_callback:
+            return response_callback(http_response)
+        return http_response
 
-    async def call_wsgi_app(self, script_name, path_info, request, wsgi_app, response_callback):
-        if self.use_wsgi_threads:
-            return await self.parent_app.loop.run_in_executor(
-                None, self._call_wsgi_app, script_name, path_info, request,
-                wsgi_app, response_callback)
-        else:
-            return self._call_wsgi_app(script_name, path_info, request,
-                                       wsgi_app, response_callback)
+    if IS_21_03:
+        async def call_wsgi_app(self, script_name, path_info, request, wsgi_app):
 
+            if self.use_wsgi_threads:
+                return await self.parent_app.loop.run_in_executor(None, self._call_wsgi, script_name, path_info, request, wsgi_app, False)
+            else:
+                return self._call_wsgi(script_name, path_info, request, wsgi_app, False)
+    else:
+        async def call_wsgi_app(self, script_name, path_info, request, wsgi_app, response_callback):
+            if self.use_wsgi_threads:
+                return await self.parent_app.loop.run_in_executor(
+                    None, self._call_wsgi, script_name, path_info, request,
+                    wsgi_app, response_callback)
+            else:
+                return self._call_wsgi(script_name, path_info, request, wsgi_app, response_callback)
     @staticmethod
     def get_request_scheme(request):
         try:
@@ -247,17 +323,32 @@ class SanicDispatcherMiddleware(object):
             path = request.path
         return application, script_str, path
 
-    async def __call__(self, request, write_callback, stream_callback):
-        # Assume at this point that we have no app. So we cannot know if we are on Websocket or not.
-        if self.hosts and len(self.hosts) > 0:
-            application, script, path = self._get_application_by_route(request, use_host=True)
-            if application is None:
-                application, script, path = self._get_application_by_route(request, use_host=False)
-        else:
-            application, script, path = self._get_application_by_route(request)
-        if application is None:  # no child matches, call the parent
-            return await self.parent_handle_request(request, write_callback, stream_callback)
+    if IS_21_03:
+        async def __call__(self, request):
+            # Assume at this point that we have no app. So we cannot know if we are on Websocket or not.
+            if self.hosts and len(self.hosts) > 0:
+                application, script, path = self._get_application_by_route(request, use_host=True)
+                if application is None:
+                    application, script, path = self._get_application_by_route(request, use_host=False)
+            else:
+                application, script, path = self._get_application_by_route(request)
+            if application is None:  # no child matches, call the parent
+                return await self.parent_handle_request(request)
+            return await self._call_2103(request, application, script, path)
+    else:
+        async def __call__(self, request, write_callback, stream_callback):
+            # Assume at this point that we have no app. So we cannot know if we are on Websocket or not.
+            if self.hosts and len(self.hosts) > 0:
+                application, script, path = self._get_application_by_route(request, use_host=True)
+                if application is None:
+                    application, script, path = self._get_application_by_route(request, use_host=False)
+            else:
+                application, script, path = self._get_application_by_route(request)
+            if application is None:  # no child matches, call the parent
+                return await self.parent_handle_request(request, write_callback, stream_callback)
+            return await self._call_old(request, application, script, path, write_callback, stream_callback)
 
+    async def _call_old(self, request, application, script, path, write_callback, stream_callback):
         real_write_callback = write_callback
         real_stream_callback = stream_callback
         response = False
@@ -307,6 +398,50 @@ class SanicDispatcherMiddleware(object):
         return real_write_callback(response)
 
 
+    async def _call_2103(self, request, application, script, path):
+
+        our_response = False
+        streaming_response = False
+
+        if request.stream.request_body:  # type: ignore
+            # Non-streaming handler: preload body
+            await request.receive_body()
+
+        parent_app = self.parent_app
+        if application.apply_middleware and parent_app.request_middleware:
+            request.app = parent_app
+            for middleware in parent_app.request_middleware:
+                our_response = middleware(request)
+                if isawaitable(our_response):
+                    our_response = await our_response
+                if our_response:
+                    break
+        child_app = application.app
+        if application.apply_middleware:
+            request = SanicComatRequest(request, parent_app)
+        if not our_response and not streaming_response:
+            if isinstance(application, WsgiApplication):  # child is wsgi_app
+                our_response = await self.call_wsgi_app(script, path, request, child_app)
+            else:  # must be a sanic application
+                request.app = child_app
+                return await child_app.handle_request(request)
+        if our_response is not None:
+            try:
+                our_response = await request.respond(our_response)
+            except BaseException:
+                # Skip response middleware
+                if request.stream:
+                    request.stream.respond(our_response)
+                await our_response.send(end_stream=True)
+                raise
+        else:
+            if request.stream:
+                our_response = request.stream.response
+        if isinstance(our_response, BaseHTTPResponse):
+            await our_response.send(end_stream=True)
+        return our_response
+
+
 class SanicDispatcherMiddlewareController(object):
     __slots__ = ['parent_app', 'parent_handle_request', 'parent_url_for', 'applications', 'url_prefix',
                  'filter_host', 'hosts', 'started']
@@ -333,7 +468,10 @@ class SanicDispatcherMiddlewareController(object):
         # Woo, monkey-patch!
         self.parent_handle_request = app.handle_request
         self.parent_url_for = app.url_for
-        self.parent_app.handle_request = self.handle_request
+        if IS_21_03:
+            self.parent_app.handle_request = self.handle_request_2103
+        else:
+            self.parent_app.handle_request = self.handle_request
         self.parent_app.url_for = self.patched_url_for
 
     async def _before_server_start_listener(self, app, loop):
@@ -361,7 +499,7 @@ class SanicDispatcherMiddlewareController(object):
     async def _after_server_start_listener(self, app, loop):
         is_asgi = getattr(app, 'asgi', False)
         if is_asgi:
-            print("Sanic-Dispatcher has not been tested on ASGI apps. It may not work correctly.")
+            error_logger.warning("Sanic-Dispatcher has not been tested on ASGI apps. It may not work correctly.")
 
         self.started = True
 
@@ -508,6 +646,18 @@ class SanicDispatcherMiddlewareController(object):
         if isawaitable(retval):
             retval = await retval
         return retval
+
+    async def handle_request_2103(self, request):
+        """
+        This is only called as a backup handler if _update_request_handler was not yet called.
+        :param request:
+        :return:
+        """
+        dispatcher = SanicDispatcherMiddleware(self.parent_app, self.parent_handle_request, self.applications,
+                                               self.hosts)
+        self.parent_app.handle_request = dispatcher  # save it for next time
+        _ = await dispatcher(request)
+        # This 2103 handler doesn't return anything
 
     def _dispatcher_url_for(self, view_name, **kwargs):
         """
