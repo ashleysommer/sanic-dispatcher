@@ -90,14 +90,7 @@ class SanicComatRequest(object):
             return object.__setattr__(self, key, val)
         return setattr(self.orig_req, key, val)
 
-    async def respond(
-            self,
-            response=None,
-            *args,
-            status=200,
-            headers=None,
-            content_type=None,
-    ):
+    async def respond(self, response=None, *args, status=200, headers=None, content_type=None):
         # From Sanic 21.03
         # This logic of determining which response to use is subject to change
         if response is None:

@@ -1,50 +1,41 @@
 sudo: false
 language: python
+dist: xenial
 cache:
   directories:
     - $HOME/.cache/pip
 matrix:
   include:
-    - env: TOX_ENV=py35
+    - env: TOXENV=py35-sanic0083
       python: 3.5
       dist: xenial
       sudo: true
-      name: "Python 3.5"
-    - env: TOX_ENV=py36
+      name: "Python 3.5 (sanic 0.8.3)"
+    - env: TOXENV=py36-sanic1812,py36-sanic1912,py36-sanic2012
       python: 3.6
       dist: xenial
       sudo: true
-      name: "Python 3.6"
-    - env: TOX_ENV=py37
+      name: "Python 3.6 (sanic 18.12, 19.12, 20.12)"
+    - env: TOXENV=py37-sanic1912,py37-sanic2012,py37-sanic2103
       python: 3.7
       dist: xenial
       sudo: true
-      name: "Python 3.7"
-    - env: TOX_ENV=py38
+      name: "Python 3.7 (sanic 19.12, 20.12, 21.03)"
+    - env: TOXENV=py38-sanic1912,py38-sanic2012,py38-sanic2103
       python: 3.8
-      dist: xenial
+      dist: bionic
       sudo: true
-      name: "Python 3.8"
-    - env: TOX_ENV=py39
+      name: "Python 3.8 (sanic 19.12, 20.12, 21.03)"
+    - env: TOXENV=py39-sanic1912,py39-sanic2012,py39-sanic2103
       python: 3.9
       dist: bionic
       sudo: true
-      name: "Python 3.9"
-    - env: TOX_ENV=type-checking
-      python: 3.7
-      name: "Python 3.7 Type checks"
-    - env: TOX_ENV=type-checking
-      python: 3.8
-      name: "Python 3.8 Type checks"
-    - env: TOX_ENV=type-checking
-      python: 3.9
-      dist: bionic
-      name: "Python 3.9 Type checks"
+      name: "Python 3.9 (sanic 19.12, 20.12, 21.03)"
 
 install:
   - pip install -U tox
   - pip install codecov
-script: travis_retry tox -e $TOX_ENV
+script: travis_retry tox
 after_success:
   - codecov
 deploy:
